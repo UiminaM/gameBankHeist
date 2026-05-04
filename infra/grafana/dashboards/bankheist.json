@@ -1,0 +1,51 @@
+{
+  "title": "Bank Heist — Overview",
+  "uid": "bankheist-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active games",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 6},
+      "targets": [{"expr": "active_games", "refId": "A"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "red", "value": 5}]}}}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Game outcomes (rate)",
+      "gridPos": {"x": 6, "y": 0, "w": 18, "h": 8},
+      "targets": [{"expr": "sum by (outcome, difficulty) (rate(game_outcomes_total[5m]))", "refId": "A", "legendFormat": "{{outcome}}/{{difficulty}}"}]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Turn duration (p50, p95)",
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum(rate(turn_duration_seconds_bucket[5m])) by (le))", "refId": "A", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(turn_duration_seconds_bucket[5m])) by (le))", "refId": "B", "legendFormat": "p95"}
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "LLM invalid JSON / role",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (role, model) (rate(llm_invalid_json_total[5m]))", "refId": "A", "legendFormat": "{{role}}|{{model}}"}]
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "Application logs (Loki)",
+      "datasource": {"type": "loki", "uid": "Loki"},
+      "gridPos": {"x": 0, "y": 16, "w": 24, "h": 10},
+      "targets": [{"expr": "{container=~\"bh-.*\"} | json", "refId": "A"}]
+    }
+  ]
+}

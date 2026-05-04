@@ -1,0 +1,206 @@
+name: bankheist
+
+services:
+  ollama:
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.21.2}
+    container_name: bh-ollama
+    profiles: ["containerized-ollama"]
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: "30m"
+      OLLAMA_NUM_PARALLEL: "2"
+    ports:
+      - "${HOST_OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - bankheist_net
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+
+  neo4j:
+    image: neo4j:5.25-community
+    container_name: bh-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:-bankheist_neo4j}"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_memory_heap_initial__size: "512m"
+      NEO4J_dbms_memory_heap_max__size: "2G"
+    ports:
+      - "${HOST_NEO4J_HTTP_PORT:-7474}:7474"
+      - "${HOST_NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    networks:
+      - bankheist_net
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p $${NEO4J_PASSWORD:-bankheist_neo4j} 'RETURN 1' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+  letta:
+    image: letta/letta:0.6.6
+    container_name: bh-letta
+    restart: unless-stopped
+    environment:
+      LETTA_PG_URI: "postgresql://${POSTGRES_USER:-bankheist}:${POSTGRES_PASSWORD:-bankheist}@postgres:5432/${POSTGRES_DB:-bankheist}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL_INTERNAL:-http://host.docker.internal:11434}"
+      LETTA_DEFAULT_LLM_PROVIDER: ollama
+      LETTA_DEFAULT_LLM_MODEL: "${MODEL_LETTA:-qwen3:4b}"
+    ports:
+      - "${HOST_LETTA_PORT:-8283}:8283"
+    networks:
+      - bankheist_net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: bh-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-bankheist}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-bankheist}"
+      POSTGRES_DB: "${POSTGRES_DB:-bankheist}"
+    ports:
+      - "${HOST_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bankheist_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-bankheist}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  langfuse-web:
+    image: langfuse/langfuse:2.93.0
+    container_name: bh-langfuse
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-bankheist}:${POSTGRES_PASSWORD:-bankheist}@postgres:5432/${POSTGRES_DB:-bankheist}"
+      NEXTAUTH_SECRET: "${NEXTAUTH_SECRET:-bankheist_nextauth_secret}"
+      NEXTAUTH_URL: "${NEXTAUTH_URL:-http://localhost:3000}"
+      SALT: "${LANGFUSE_SALT:-bankheist_langfuse_salt}"
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+    ports:
+      - "${HOST_LANGFUSE_PORT:-3000}:3000"
+    networks:
+      - bankheist_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.0.0
+    container_name: bh-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${HOST_PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - bankheist_net
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: bh-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${HOST_GRAFANA_PORT:-3001}:3000"
+    networks:
+      - bankheist_net
+    depends_on:
+      - prometheus
+      - loki
+
+  loki:
+    image: grafana/loki:3.3.0
+    container_name: bh-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./infra/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "${HOST_LOKI_PORT:-3100}:3100"
+    networks:
+      - bankheist_net
+
+  promtail:
+    image: grafana/promtail:3.3.0
+    container_name: bh-promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./infra/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - bankheist_net
+    depends_on:
+      - loki
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bh-gateway
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL_INTERNAL:-http://host.docker.internal:11434}"
+      NEO4J_URI: "bolt://neo4j:7687"
+      LETTA_BASE_URL: "http://letta:8283"
+      POSTGRES_DSN: "postgresql://${POSTGRES_USER:-bankheist}:${POSTGRES_PASSWORD:-bankheist}@postgres:5432/${POSTGRES_DB:-bankheist}"
+      LANGFUSE_HOST: "http://langfuse-web:3000"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://langfuse-web:3000/api/public/otel"
+      PROMETHEUS_PORT: "9100"
+    ports:
+      - "${HOST_GATEWAY_PORT:-8000}:8000"
+      - "${HOST_GATEWAY_METRICS_PORT:-9100}:9100"
+    networks:
+      - bankheist_net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_started
+
+volumes:
+  ollama_models:
+  neo4j_data:
+  neo4j_logs:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+
+networks:
+  bankheist_net:
+    driver: bridge
